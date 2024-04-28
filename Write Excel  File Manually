@@ -1,0 +1,259 @@
+using FileMatcher.Models;
+using Microsoft.Office.Interop.Excel;
+using System.ComponentModel;
+using System.Data;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows;
+using static CommonHelpers;
+using Excel = Microsoft.Office.Interop.Excel;
+
+namespace FileMatcher.FileOperations
+{
+    public class FileOperationsWrite
+    {
+        DoWorkEventArgs doWorkEventArgs;
+        BackgroundWorker background;
+
+        public FileOperationsWrite()
+        {
+        }
+        public void SetupBackgroundWorker(BackgroundWorker bw, DoWorkEventArgs e)
+        {
+            background = bw;
+            doWorkEventArgs = e;
+        }
+
+        public void Write(System.Data.DataTable? targetTable, string filePath)
+        {
+            ArgumentNullException.ThrowIfNull(targetTable);
+            ArgumentNullException.ThrowIfNull(targetTable);
+
+            DateTime dateStart = DateTime.Now;
+            Excel.Application excel;
+            Excel.Workbook excelworkBook;
+            Excel.Worksheet excelSheet;
+            bool IsExcelWasRunning = true;
+
+            try
+            {
+                int rows = targetTable?.Rows.Count ?? 0;
+                background.ReportProgress(0, WorkerUserState.TMIN.ToString());
+                background.ReportProgress(rows, WorkerUserState.TMAX.ToString());
+
+                DateTime dateEnd = DateTime.Now;
+                Kill_TheExcelAppThatWontGoAway(dateStart.AddDays(-7), dateEnd);
+
+                try
+                {
+                    excel = (Excel.Application)getActiveObject("Excel.Application");
+                }
+                catch
+                {
+                    excel = new Excel.Application();
+                    IsExcelWasRunning = false;
+                }
+
+                filePath = CheckFileExistsOrRename(filePath, IsExcelWasRunning);
+
+                excel.Visible = false;
+                excel.DisplayAlerts = false;
+
+
+                excelworkBook = excel.Workbooks.Add(Type.Missing);
+
+                excelSheet = (Excel.Worksheet)excelworkBook.ActiveSheet;
+                excelSheet.Name = "Merge File";
+
+                int rowcount = 1;
+                int columncount = 0;
+
+                foreach (DataColumn datacol in targetTable.Columns)
+                {
+                    columncount+=1;
+                    excelSheet.Cells[rowcount, columncount] = targetTable.Columns[columncount - 1].ColumnName;
+                }
+                excelSheet.Range[excelSheet.Cells[1, 1], excelSheet.Cells[rowcount, columncount]].Cells.Borders.Weight = XlBorderWeight.xlMedium;
+                foreach (DataRow datarow in targetTable.Rows)
+                {
+                    background.ReportProgress(rowcount, WorkerUserState.TARGET.ToString());
+                    rowcount += 1;
+                    for (int i = 1; i <= targetTable.Columns.Count; i++)
+                    {
+                        excelSheet.Cells[rowcount, i] = datarow[i - 1].ToString();
+                    }
+                    if (background.CancellationPending)
+                    {
+                        doWorkEventArgs.Cancel = true;
+                        return;
+                    }
+                }
+                excelSheet.Range[excelSheet.Cells[2,1], excelSheet.Cells[rowcount, columncount]].Cells.Borders.Weight = XlBorderWeight.xlThin;
+                excelSheet.PageSetup.Orientation = XlPageOrientation.xlLandscape;
+                excelSheet.PageSetup.FitToPagesWide = 1;
+
+                excel.Application.ActiveWindow.DisplayGridlines = true;
+                excel.ScreenUpdating = true;
+                excel.ActiveWindow.FreezePanes = false;
+
+                if (!IsExcelWasRunning)
+                {
+                    excelworkBook.SaveAs(filePath);
+                    excelworkBook.Close(false);
+                    excel.Quit();
+
+                    dateEnd = DateTime.Now;
+                    Kill_TheExcelAppThatWontGoAway(dateStart, dateEnd);
+                    StartExcelProcess(filePath);
+                }
+                else
+                {
+                    StartExcelProcess(filePath);
+                }
+
+                doWorkEventArgs.Result = new ReturnResult { ProgressFor = "DOWN", ProgressResult = "DOWNLOAD COMPLETED" };
+                Marshal.FinalReleaseComObject(excelSheet);
+                Marshal.FinalReleaseComObject(excelworkBook);
+                Marshal.FinalReleaseComObject(excel);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error to create excel file " + ex.Message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+        }
+
+        private static void StartExcelProcess(string filePath)
+        {
+            ProcessStartInfo ps = new ProcessStartInfo();
+            ps.FileName = "excel"; // "EXCEL.EXE" also works
+            ps.Arguments = filePath;
+            ps.UseShellExecute = true;
+            Process.Start(ps);
+        }
+
+        public void Kill_TheExcelAppThatWontGoAway(DateTime dateStart, DateTime dateEnd)
+        {
+            Process[] xlProcesses = Process.GetProcessesByName("EXCEL");
+
+            foreach (Process process in xlProcesses)
+            {
+                if (process.StartTime >= dateStart && process.StartTime <= dateEnd)
+                {
+                    process.Kill();
+                    break;
+                }
+            }
+        }
+
+
+        private static string CheckFileExistsOrRename(string filePath, bool IsExcelWasRunning)
+        {
+            if (!IsExcelWasRunning && File.Exists(filePath))
+            {
+                int fileNo = 0;
+                filePath = filePath.Substring(0, filePath.Length - 5);
+                while (File.Exists(filePath + "(" + fileNo + ").xlsx"))
+                {
+                    fileNo = fileNo + 1;
+
+                }
+                filePath = filePath + "(" + fileNo + ").xlsx";
+            }
+
+            return filePath;
+        }
+
+        [DllImport("user32", PreserveSig = false)]
+        static extern void EnumWindo(ref Guid rclsid, IntPtr pvReserved, [MarshalAs(UnmanagedType.IUnknown)] out Object ppunk);
+
+
+        [DllImport("oleaut32.dll", PreserveSig = false)]
+        static extern void GetActiveObject(ref Guid rclsid, IntPtr pvReserved, [MarshalAs(UnmanagedType.IUnknown)] out Object ppunk);
+
+        [DllImport("ole32.dll")]
+        static extern int CLSIDFromProgID([MarshalAs(UnmanagedType.LPWStr)] string lpszProgID, out Guid pclsid);
+
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder strText, int maxCount);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+        // Delegate to filter which windows to include 
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        /// <summary> Get the text for the window pointed to by hWnd </summary>
+        public static string GetWindowText(IntPtr hWnd)
+        {
+            int size = GetWindowTextLength(hWnd);
+            if (size > 0)
+            {
+                var builder = new StringBuilder(size + 1);
+                GetWindowText(hWnd, builder, builder.Capacity);
+                return builder.ToString();
+            }
+
+            return String.Empty;
+        }
+
+        /// <summary> Find all windows that match the given filter </summary>
+        /// <param name="filter"> A delegate that returns true for windows
+        ///    that should be returned and false for windows that should
+        ///    not be returned </param>
+        public static IEnumerable<IntPtr> FindWindows(EnumWindowsProc filter)
+        {
+            IntPtr found = IntPtr.Zero;
+            List<IntPtr> windows = new List<IntPtr>();
+
+            EnumWindows(delegate (IntPtr wnd, IntPtr param)
+            {
+                if (filter(wnd, param))
+                {
+                    // only add the windows that pass the filter
+                    windows.Add(wnd);
+                }
+
+                // but return true here so that we iterate all windows
+                return true;
+            }, IntPtr.Zero);
+
+            return windows;
+        }
+
+        /// <summary> Find all windows that contain the given title text </summary>
+        /// <param name="titleText"> The text that the window title must contain. </param>
+        public static IEnumerable<IntPtr> FindWindowsWithText(string titleText)
+        {
+            return FindWindows(delegate (IntPtr wnd, IntPtr param)
+            {
+                return GetWindowText(wnd).Contains(titleText);
+            });
+        }
+
+        public static object getActiveObject(string progId)
+        {
+            Guid clsid;
+            CLSIDFromProgID(progId, out clsid);
+
+            object obj;
+            GetActiveObject(ref clsid, IntPtr.Zero, out obj);
+
+            return obj;
+        }
+
+
+    }
+}
